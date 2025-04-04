@@ -10,3 +10,5 @@ I'm trying to get more familiar with:
 - VecDeque
 - Implementing a Load Balancer
 - Implementing Task Workers
+
+Currently this is not a distributed queue, however I plan on working towards it incrementally.
