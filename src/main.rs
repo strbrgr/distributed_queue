@@ -11,8 +11,9 @@ use tokio::time;
 use uuid::Uuid;
 
 type Queue = Arc<Mutex<VecDeque<Task>>>;
+type Workers = Arc<Mutex<Vec<Worker>>>;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 enum WorkerState {
     Idle,
     Working,
@@ -22,7 +23,6 @@ enum WorkerState {
 struct Worker {
     id: Uuid,
     state: WorkerState,
-    healthy: bool,
     handled_tasks: i32,
     task_id: Option<Uuid>,
 }
@@ -32,16 +32,17 @@ impl Worker {
         Worker {
             id: Uuid::new_v4(),
             state: WorkerState::Idle,
-            healthy: true,
             handled_tasks: 0,
             task_id: None,
         }
     }
 
-    pub fn handle_task(&mut self, task: Task) {
-        println!("{:?}", task);
-        self.handled_tasks += 1;
-        self.state = WorkerState::Working;
+    pub async fn handle_task(&mut self, task: Task) {
+        println!(
+            "Worker with id: {} is handling task with id: {}",
+            self.id, task.id
+        );
+        time::sleep(time::Duration::from_secs(5)).await;
     }
 }
 
@@ -59,7 +60,7 @@ pub struct Task {
 #[derive(Clone)]
 pub struct AppState {
     queue: Queue,
-    workers: Arc<Mutex<Vec<Worker>>>,
+    workers: Workers,
 }
 
 async fn create_task(
@@ -82,27 +83,60 @@ async fn create_task(
     )
 }
 
+fn get_idle_worker_idx(workers: &Workers) -> Option<usize> {
+    let workers_guard = workers.lock().unwrap();
+    if let Some((idx, _)) = workers_guard
+        .iter()
+        .enumerate()
+        .find(|(_, w)| matches!(w.state, WorkerState::Idle))
+    {
+        return Some(idx);
+    }
+    None
+}
+
 async fn process_queue(state: Arc<AppState>) {
     loop {
         let mut queue = state.queue.lock().unwrap();
-        if let Some(task) = queue.pop_back() {
-            drop(queue); // early release
-            let mut workers = state.workers.lock().unwrap();
-            handle_load(&mut workers, task);
-        } else {
-            drop(queue);
+        let idle_worker_idx = get_idle_worker_idx(&state.workers);
+        if let Some(idx) = idle_worker_idx {
+            // We have a worker let us pop from the queue
+            println!("Idle worker index is: {}", idx);
+            if let Some(task) = queue.pop_back() {
+                handle_load(state.workers.clone(), task);
+            }
         }
-        thread::sleep(time::Duration::from_secs(5));
+        drop(queue);
+
+        thread::sleep(time::Duration::from_secs(1));
     }
 }
 
-fn handle_load(workers: &mut Vec<Worker>, task: Task) {
-    let worker = workers
-        .iter_mut()
-        .find(|w| matches!(w.state, WorkerState::Idle));
+fn handle_load(workers: Arc<Mutex<Vec<Worker>>>, task: Task) {
+    let mut workers_guard = workers.lock().unwrap();
+    if let Some((idx, _)) = workers_guard
+        .iter()
+        .enumerate()
+        .find(|(_, w)| matches!(w.state, WorkerState::Idle))
+    {
+        let mut worker = workers_guard[idx].clone();
+        worker.state = WorkerState::Working;
+        workers_guard[idx] = worker.clone();
 
-    if let Some(w) = worker {
-        w.handle_task(task);
+        drop(workers_guard);
+
+        // Background processing
+        tokio::spawn(async move {
+            worker.handle_task(task).await;
+            let mut workers = workers.lock().unwrap();
+            if let Some(w) = workers.get_mut(idx) {
+                w.state = WorkerState::Idle;
+                w.task_id = None;
+                w.handled_tasks += 1;
+            }
+        });
+    } else {
+        println!("All workers are busy");
     }
 }
 
