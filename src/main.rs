@@ -12,18 +12,19 @@ use uuid::Uuid;
 
 type Queue = Arc<Mutex<VecDeque<Task>>>;
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 enum WorkerState {
     Idle,
     Working,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Worker {
     id: Uuid,
     state: WorkerState,
     healthy: bool,
     handled_tasks: i32,
+    task_id: Option<Uuid>,
 }
 
 impl Worker {
@@ -33,10 +34,15 @@ impl Worker {
             state: WorkerState::Idle,
             healthy: true,
             handled_tasks: 0,
+            task_id: None,
         }
     }
 
-    pub fn handle_task(&mut self, task: Task) {}
+    pub fn handle_task(&mut self, task: Task) {
+        println!("{:?}", task);
+        self.handled_tasks += 1;
+        self.state = WorkerState::Working;
+    }
 }
 
 #[derive(Deserialize)]
@@ -53,11 +59,11 @@ pub struct Task {
 #[derive(Clone)]
 pub struct AppState {
     queue: Queue,
-    workers: Vec<Worker>,
+    workers: Arc<Mutex<Vec<Worker>>>,
 }
 
 async fn create_task(
-    state: Extension<AppState>,
+    state: Extension<Arc<AppState>>,
     Json(payload): Json<CreateTask>,
 ) -> impl IntoResponse {
     let task = Task {
@@ -76,29 +82,37 @@ async fn create_task(
     )
 }
 
-async fn process_queue(state: AppState) {
+async fn process_queue(state: Arc<AppState>) {
     loop {
         let mut queue = state.queue.lock().unwrap();
-        if !queue.is_empty() {
-            let task = queue.pop_back().unwrap();
-            handle_load(&state.workers, task);
+        if let Some(task) = queue.pop_back() {
+            drop(queue); // early release
+            let mut workers = state.workers.lock().unwrap();
+            handle_load(&mut workers, task);
+        } else {
+            drop(queue);
         }
-        drop(queue);
         thread::sleep(time::Duration::from_secs(5));
     }
 }
 
-fn handle_load(workers: &Vec<Worker>, task: Task) {
-    todo!() // Handle load balancing
+fn handle_load(workers: &mut Vec<Worker>, task: Task) {
+    let worker = workers
+        .iter_mut()
+        .find(|w| matches!(w.state, WorkerState::Idle));
+
+    if let Some(w) = worker {
+        w.handle_task(task);
+    }
 }
 
-fn init_workers() -> Vec<Worker> {
+fn init_workers() -> Arc<Mutex<Vec<Worker>>> {
     let mut workers: Vec<Worker> = Vec::new();
     for _ in 0..4 {
         let worker = Worker::new();
         workers.push(worker);
     }
-    workers
+    Arc::new(Mutex::new(workers))
 }
 
 #[tokio::main]
@@ -106,7 +120,7 @@ async fn main() -> Result<(), std::io::Error> {
     let queue = Arc::new(Mutex::new(VecDeque::new()));
     let workers = init_workers();
 
-    let state = AppState { queue, workers };
+    let state = Arc::new(AppState { queue, workers });
     let worker_state = state.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:4000")
         .await
