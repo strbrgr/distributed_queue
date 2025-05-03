@@ -6,6 +6,7 @@ Just playing around with Rust and trying to better understand some of its featur
 
 I'm trying to get more familiar with:
 
+
 - Mutex
 - VecDeque
 - Implementing a Load Balancer
